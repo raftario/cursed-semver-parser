@@ -1,0 +1,11 @@
+[package]
+name = "cursed-semver-parser"
+version = "0.1.0"
+edition = "2018"
+authors = ["Raphaël Thériault <self@raftar.io>"]
+license = "MIT"
+
+[dependencies]
+semver = "1"
+logos = "0.12"
+thiserror = "1"

@@ -126,6 +126,15 @@ pub enum Error<'a> {
     UnexpectedInput(&'a str),
 }
 
+#[cfg(feature = "serde")]
+pub fn deserialize<'de, D>(deserializer: D) -> Result<VersionReq, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    let text = <&str as serde::de::Deserialize>::deserialize(deserializer)?;
+    parse(text).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

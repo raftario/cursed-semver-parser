@@ -10,3 +10,6 @@ semver = "1"
 logos = "0.12"
 thiserror = "1"
 serde = { version = "1", optional = true }
+
+[dev-dependencies]
+quickcheck = "1"

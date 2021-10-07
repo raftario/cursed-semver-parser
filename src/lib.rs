@@ -18,7 +18,7 @@ fn parse_one<'a>(
     lexer: &mut Lexer<'a, Token>,
     remainder: Option<Token>,
 ) -> Result<Option<(Comparator, Option<Token>)>, Error<'a>> {
-    let (op, major) = match remainder.or_else(|| lexer.next()) {
+    let (mut op, major) = match remainder.or_else(|| lexer.next()) {
         Some(Token::Exact) => (Op::Exact, None),
         Some(Token::Greater) => (Op::Greater, None),
         Some(Token::GreaterEq) => (Op::GreaterEq, None),
@@ -26,7 +26,13 @@ fn parse_one<'a>(
         Some(Token::LessEq) => (Op::LessEq, None),
         Some(Token::Tilde) => (Op::Tilde, None),
         Some(Token::Caret) => (Op::Caret, None),
-        Some(Token::Wildcard) | None => return Ok(None),
+        Some(Token::Wildcard) | None => {
+            return if lexer.next().is_none() {
+                Ok(None)
+            } else {
+                Err(Error::UnexpectedInput(lexer.slice()))
+            }
+        }
         Some(token) => (Op::Exact, Some(token)),
     };
 
@@ -37,37 +43,31 @@ fn parse_one<'a>(
     };
 
     macro_rules! matcher {
-        {
-            ($minor:expr, $patch:expr) => $expr:expr
-        } => {
+        ($minor:expr, $patch:expr $(, $expr:expr)?) => {
             match lexer.next() {
-                Some(Token::Dot) => match lexer.next() {
+                $(Some(Token::Dot) => match lexer.next() {
                     Some(Token::Num) => $expr,
+                    Some(Token::Wildcard) => {
+                        op = Op::Wildcard;
+                        matcher!($minor, $patch)
+                    }
                     Some(_) => return Err(Error::UnexpectedInput(lexer.slice())),
                     None => return Err(Error::UnexpectedEoi),
-                },
+                },)?
                 Some(Token::Pre) => ($minor, $patch, Prerelease::new(&lexer.slice()[1..])?, None),
                 Some(token) => ($minor, $patch, Prerelease::EMPTY, Some(token)),
                 None => ($minor, $patch, Prerelease::EMPTY, None),
             }
-        }
+        };
     }
 
-    let (minor, patch, pre, remainder) = matcher! {
-        (None, None) => {
-            let minor = lexer.slice().parse()?;
-            matcher! {
-                (Some(minor), None) => {
-                    let patch = lexer.slice().parse()?;
-                    match lexer.next() {
-                        Some(Token::Pre) => (Some(minor), Some(patch), Prerelease::new(&lexer.slice()[1..])?, None),
-                        Some(token) => (Some(minor), Some(patch), Prerelease::EMPTY, Some(token)),
-                        None => (Some(minor), Some(patch), Prerelease::EMPTY, None),
-                    }
-                }
-            }
-        }
-    };
+    let (minor, patch, pre, remainder) = matcher!(None, None, {
+        let minor = lexer.slice().parse()?;
+        matcher!(Some(minor), None, {
+            let patch = lexer.slice().parse()?;
+            matcher!(Some(minor), Some(patch))
+        })
+    });
 
     Ok(Some((
         Comparator {
@@ -83,7 +83,7 @@ fn parse_one<'a>(
 
 #[derive(Logos)]
 enum Token {
-    #[regex("[0-9]+")]
+    #[regex("0|([1-9][0-9]*)")]
     Num,
     #[regex("-[A-Za-z0-9-.]+")]
     Pre,
@@ -137,14 +137,105 @@ where
 
 #[cfg(test)]
 mod tests {
+    use quickcheck::{Gen, QuickCheck};
+    use semver::{Comparator, Op, Prerelease, VersionReq};
+    use std::iter;
+
+    use super::parse;
+
     #[test]
     fn not_separated() {
         let separated = ">=0.6.5, <0.8";
         let not_separated = ">=0.6.5<0.8";
 
         assert_eq!(
-            super::parse(not_separated).unwrap(),
-            super::VersionReq::parse(separated).unwrap(),
+            parse(not_separated).unwrap(),
+            VersionReq::parse(separated).unwrap(),
         );
+    }
+
+    #[test]
+    fn wildcard() {
+        let cases = ["*", "0.*", "0.0.*"];
+        for text in cases {
+            assert_eq!(parse(text).unwrap(), VersionReq::parse(text).unwrap(),);
+        }
+    }
+
+    #[test]
+    fn follows_semver_crate() {
+        fn t(Arbitrary(version): Arbitrary<VersionReq>) -> bool {
+            let text = version.to_string();
+            parse(&text).unwrap() == VersionReq::parse(&text).unwrap()
+        }
+
+        QuickCheck::new()
+            .tests(2048)
+            .quickcheck(t as fn(Arbitrary<VersionReq>) -> bool);
+    }
+
+    #[derive(Debug, Clone)]
+    struct Arbitrary<T>(T);
+
+    impl quickcheck::Arbitrary for Arbitrary<VersionReq> {
+        fn arbitrary(gen: &mut Gen) -> Self {
+            let comparator_counts: Box<[usize]> = (0..10).collect();
+            let comparator_count = *gen.choose(&comparator_counts).unwrap();
+
+            let comparators = (0..comparator_count)
+                .map(|_| <Arbitrary<Comparator>>::arbitrary(gen).0)
+                .collect();
+
+            Self(VersionReq { comparators })
+        }
+
+        fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+            let comparators = self.0.comparators.iter().cloned().map(Arbitrary).collect();
+            let iterator = <Vec<Arbitrary<Comparator>>>::shrink(&comparators).map(|comparators| {
+                let comparators = comparators
+                    .into_iter()
+                    .map(|comparator| comparator.0)
+                    .collect();
+                Self(VersionReq { comparators })
+            });
+            Box::new(iterator)
+        }
+    }
+
+    impl quickcheck::Arbitrary for Arbitrary<Comparator> {
+        fn arbitrary(gen: &mut Gen) -> Self {
+            let ops = [
+                Op::Exact,
+                Op::Greater,
+                Op::GreaterEq,
+                Op::Less,
+                Op::LessEq,
+                Op::Tilde,
+                Op::Caret,
+                Op::Wildcard,
+            ];
+            let majors: Box<[u64]> = (0..10).collect();
+            let minors_and_patches: Box<[Option<u64>]> = (0..100)
+                .map(Some)
+                .chain(iter::repeat(None).take(50))
+                .collect();
+
+            let mut op = *gen.choose(&ops).unwrap();
+            let major = *gen.choose(&majors).unwrap();
+            let minor = *gen.choose(&minors_and_patches).unwrap();
+            let patch = minor.and_then(|_| *gen.choose(&minors_and_patches).unwrap());
+
+            if matches!((op, patch), (Op::Wildcard, Some(_))) {
+                op = Op::Tilde;
+            }
+
+            Self(Comparator {
+                op,
+                major,
+                minor,
+                patch,
+                pre: Prerelease::EMPTY,
+            })
+        }
     }
 }

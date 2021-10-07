@@ -219,11 +219,27 @@ mod tests {
                 .map(Some)
                 .chain(iter::repeat(None).take(50))
                 .collect();
+            let pres_1: Box<[Option<&str>]> = ["alpha", "beta", "rc"]
+                .iter()
+                .copied()
+                .map(Some)
+                .chain(iter::repeat(None).take(3))
+                .collect();
+            let pres_2: Box<[u64]> = (1..10).collect();
 
             let mut op = *gen.choose(&ops).unwrap();
             let major = *gen.choose(&majors).unwrap();
             let minor = *gen.choose(&minors_and_patches).unwrap();
             let patch = minor.and_then(|_| *gen.choose(&minors_and_patches).unwrap());
+            let pre = patch.map_or(Prerelease::EMPTY, |_| {
+                gen.choose(&pres_1)
+                    .unwrap()
+                    .map_or(Prerelease::EMPTY, |p1| {
+                        let p2 = *gen.choose(&pres_2).unwrap();
+                        let s = format!("{}.{}", p1, p2);
+                        Prerelease::new(&s).unwrap()
+                    })
+            });
 
             if matches!((op, patch), (Op::Wildcard, Some(_))) {
                 op = Op::Tilde;
@@ -234,7 +250,7 @@ mod tests {
                 major,
                 minor,
                 patch,
-                pre: Prerelease::EMPTY,
+                pre,
             })
         }
     }

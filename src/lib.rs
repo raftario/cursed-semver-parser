@@ -131,8 +131,38 @@ pub fn deserialize<'de, D>(deserializer: D) -> Result<VersionReq, D::Error>
 where
     D: serde::de::Deserializer<'de>,
 {
-    let text = <&str as serde::de::Deserialize>::deserialize(deserializer)?;
-    parse(text).map_err(serde::de::Error::custom)
+    use serde::de::{Error, Visitor};
+    use std::fmt;
+
+    struct CursedVersionReqVisitor;
+    impl<'de> Visitor<'de> for CursedVersionReqVisitor {
+        type Value = VersionReq;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a version range string")
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            parse(v).map_err(E::custom)
+        }
+        fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            parse(v).map_err(E::custom)
+        }
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            parse(&v).map_err(E::custom)
+        }
+    }
+
+    deserializer.deserialize_str(CursedVersionReqVisitor)
 }
 
 #[cfg(test)]
